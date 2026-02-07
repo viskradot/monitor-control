@@ -111,14 +111,9 @@ class MONITORINFOEXW(ctypes.Structure):
     ]
 
 
-user32.EnumDisplayMonitors.argtypes = [
-    ctypes.wintypes.HDC,
-    ctypes.POINTER(ctypes.wintypes.RECT),
-    ctypes.c_void_p,
-    ctypes.wintypes.LPARAM,
-]
-user32.EnumDisplayMonitors.restype = ctypes.wintypes.BOOL
-
+# Note: argtypes for EnumDisplayMonitors intentionally omitted — ctypes.windll.user32
+# is a process-wide singleton and monitorcontrol library passes 0 (not None) for lprcClip,
+# which would fail strict LP_RECT type checking.
 user32.GetMonitorInfoW.argtypes = [
     ctypes.wintypes.HMONITOR,
     ctypes.POINTER(MONITORINFOEXW),
