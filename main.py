@@ -47,19 +47,19 @@ def _create_app_icon(size: int = 32) -> Image.Image:
     draw.rounded_rectangle(
         [s * 0.1, s * 0.08, s * 0.9, s * 0.62],
         radius=int(s * 0.05),
-        outline="#ecf0f1",
+        outline=CLR_TEXT,
         width=lw,
     )
     draw.rectangle(
         [s * 0.18, s * 0.16, s * 0.82, s * 0.54],
-        fill="#3498db",
+        fill=CLR_BLUE,
     )
     cx = s * 0.5
-    draw.line([(cx, s * 0.62), (cx, s * 0.76)], fill="#ecf0f1", width=lw)
+    draw.line([(cx, s * 0.62), (cx, s * 0.76)], fill=CLR_TEXT, width=lw)
     draw.rounded_rectangle(
         [s * 0.3, s * 0.76, s * 0.7, s * 0.84],
         radius=int(s * 0.025),
-        fill="#ecf0f1",
+        fill=CLR_TEXT,
     )
 
     return img
@@ -70,8 +70,9 @@ def _get_icon_path() -> str:
     os.makedirs(icon_dir, exist_ok=True)
     icon_path = os.path.join(icon_dir, "icon.ico")
 
-    img = _create_app_icon(256)
-    img.save(icon_path, format="ICO", sizes=[(256, 256), (48, 48), (32, 32), (16, 16)])
+    if not os.path.exists(icon_path):
+        img = _create_app_icon(256)
+        img.save(icon_path, format="ICO", sizes=[(256, 256), (48, 48), (32, 32), (16, 16)])
     return icon_path
 
 
@@ -198,6 +199,9 @@ class MonitorCard(ctk.CTkFrame):
         self.switch_var.set("off" if attempted_on else "on")
         self._update_status()
 
+        if not self.app._window_visible:
+            return
+
         err = ctk.CTkToplevel(self.app)
         err.title("Error")
         err.geometry("280x100")
@@ -234,9 +238,10 @@ class MonitorControlApp(ctk.CTk):
         self._icon_path = _get_icon_path()
         self.iconbitmap(self._icon_path)
 
+        _icon_img = _create_app_icon(32)
         self._icon_photo = ctk.CTkImage(
-            light_image=_create_app_icon(32),
-            dark_image=_create_app_icon(32),
+            light_image=_icon_img,
+            dark_image=_icon_img,
             size=(24, 24),
         )
 
@@ -295,8 +300,8 @@ class MonitorControlApp(ctk.CTk):
         self.status_bar.pack(side="right")
 
     def _load_monitors(self):
-        for card in self.monitor_cards:
-            card.destroy()
+        for child in self.cards_frame.winfo_children():
+            child.destroy()
         self.monitor_cards.clear()
 
         try:
@@ -387,7 +392,7 @@ class MonitorControlApp(ctk.CTk):
         def toggle(icon, item):
             for card in self.monitor_cards:
                 if isinstance(card, MonitorCard) and card.monitor.index == index:
-                    current = card.switch_var.get() == "on"
+                    current = card.monitor.power_on
                     new_state = not current
                     success = set_monitor_power(index, new_state)
                     if success:

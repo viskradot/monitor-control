@@ -3,11 +3,14 @@
 import ctypes
 import ctypes.wintypes
 import json
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
 
 from monitorcontrol import get_monitors, PowerMode
+
+logger = logging.getLogger(__name__)
 
 
 # --- Cache pro názvy monitorů (DDC/CI capabilities jsou pomalé) ---
@@ -19,6 +22,7 @@ def _load_cache() -> dict:
     try:
         return json.loads(CACHE_PATH.read_text(encoding="utf-8"))
     except Exception:
+        logger.debug("Failed to load monitor name cache", exc_info=True)
         return {}
 
 
@@ -27,7 +31,7 @@ def _save_cache(cache: dict):
         CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
         CACHE_PATH.write_text(json.dumps(cache), encoding="utf-8")
     except Exception:
-        pass
+        logger.warning("Failed to save monitor name cache", exc_info=True)
 
 
 # --- Mapování výrobců podle prefixů modelů ---
@@ -77,14 +81,16 @@ MANUFACTURER_MAP = {
 }
 
 
+# Prefixes sorted longest-first for greedy matching (avoids e.g. "PA" matching before "PG27")
+_SORTED_PREFIXES = sorted(MANUFACTURER_MAP.items(), key=lambda x: len(x[0]), reverse=True)
+
+
 def _guess_manufacturer(model: str) -> str | None:
-    """Odhadne výrobce z názvu modelu."""
+    """Guess manufacturer from model name prefix."""
     upper = model.upper()
-    # Zkusit delší prefixy nejdřív
-    for prefix_len in (3, 2):
-        for prefix, mfg in MANUFACTURER_MAP.items():
-            if len(prefix) == prefix_len and upper.startswith(prefix):
-                return mfg
+    for prefix, mfg in _SORTED_PREFIXES:
+        if upper.startswith(prefix):
+            return mfg
     return None
 
 
@@ -103,6 +109,21 @@ class MONITORINFOEXW(ctypes.Structure):
         ("dwFlags", ctypes.wintypes.DWORD),
         ("szDevice", ctypes.wintypes.WCHAR * 32),
     ]
+
+
+user32.EnumDisplayMonitors.argtypes = [
+    ctypes.wintypes.HDC,
+    ctypes.POINTER(ctypes.wintypes.RECT),
+    ctypes.c_void_p,
+    ctypes.wintypes.LPARAM,
+]
+user32.EnumDisplayMonitors.restype = ctypes.wintypes.BOOL
+
+user32.GetMonitorInfoW.argtypes = [
+    ctypes.wintypes.HMONITOR,
+    ctypes.POINTER(MONITORINFOEXW),
+]
+user32.GetMonitorInfoW.restype = ctypes.wintypes.BOOL
 
 
 def _get_windows_monitors() -> list[dict]:
@@ -185,10 +206,11 @@ def get_monitors_fast() -> list[MonitorInfo]:
     return result
 
 
-def enrich_monitor_info(monitors: list[MonitorInfo]) -> list[MonitorInfo]:
-    """Pomalá fáze — DDC/CI capabilities + power mode."""
+def enrich_monitor_info(monitors: list[MonitorInfo], win_monitors: list[dict] | None = None) -> list[MonitorInfo]:
+    """Slow phase — DDC/CI capabilities + power mode."""
     physical_monitors = get_monitors()
-    win_monitors = _get_windows_monitors()
+    if win_monitors is None:
+        win_monitors = _get_windows_monitors()
     cache = _load_cache()
     updated = False
 
