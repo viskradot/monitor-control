@@ -5,12 +5,16 @@ import ctypes.wintypes
 import json
 import logging
 import os
-from dataclasses import dataclass
+import threading
+import time
+from dataclasses import dataclass, replace
 from pathlib import Path
 
-from monitorcontrol import get_monitors, PowerMode
+from monitorcontrol import Monitor, PowerMode
+from monitorcontrol.vcp.vcp_windows import WindowsVCP
 
 logger = logging.getLogger(__name__)
+_DDC_LOCK = threading.Lock()
 
 
 # --- Cache pro názvy monitorů (DDC/CI capabilities jsou pomalé) ---
@@ -111,6 +115,24 @@ class MONITORINFOEXW(ctypes.Structure):
     ]
 
 
+class DISPLAY_DEVICEW(ctypes.Structure):
+    _fields_ = [
+        ("cb", ctypes.wintypes.DWORD),
+        ("DeviceName", ctypes.wintypes.WCHAR * 32),
+        ("DeviceString", ctypes.wintypes.WCHAR * 128),
+        ("StateFlags", ctypes.wintypes.DWORD),
+        ("DeviceID", ctypes.wintypes.WCHAR * 128),
+        ("DeviceKey", ctypes.wintypes.WCHAR * 128),
+    ]
+
+
+user32.EnumDisplayDevicesW.argtypes = [
+    ctypes.wintypes.LPCWSTR, ctypes.wintypes.DWORD,
+    ctypes.POINTER(DISPLAY_DEVICEW), ctypes.wintypes.DWORD,
+]
+user32.EnumDisplayDevicesW.restype = ctypes.wintypes.BOOL
+
+
 # Note: argtypes for EnumDisplayMonitors intentionally omitted — ctypes.windll.user32
 # is a process-wide singleton and monitorcontrol library passes 0 (not None) for lprcClip,
 # which would fail strict LP_RECT type checking.
@@ -128,7 +150,8 @@ def _get_windows_monitors() -> list[dict]:
     def callback(hmonitor, hdc, lprect, lparam):
         info = MONITORINFOEXW()
         info.cbSize = ctypes.sizeof(MONITORINFOEXW)
-        user32.GetMonitorInfoW(hmonitor, ctypes.byref(info))
+        if not user32.GetMonitorInfoW(hmonitor, ctypes.byref(info)):
+            return True
 
         rc = info.rcMonitor
         width = rc.right - rc.left
@@ -136,12 +159,19 @@ def _get_windows_monitors() -> list[dict]:
         is_primary = bool(info.dwFlags & MONITORINFOF_PRIMARY)
 
         device_name = info.szDevice
+        device = DISPLAY_DEVICEW()
+        device.cb = ctypes.sizeof(device)
+        identity = ""
+        if user32.EnumDisplayDevicesW(device_name, 0, ctypes.byref(device), 1):
+            identity = device.DeviceID
 
         monitors.append({
             "device": device_name,
             "width": width,
             "height": height,
             "primary": is_primary,
+            "identity": identity,
+            "hmonitor": hmonitor,
         })
         return True
 
@@ -152,7 +182,8 @@ def _get_windows_monitors() -> list[dict]:
         ctypes.POINTER(ctypes.wintypes.RECT),
         ctypes.wintypes.LPARAM,
     )
-    user32.EnumDisplayMonitors(None, None, MONITORENUMPROC(callback), 0)
+    if not user32.EnumDisplayMonitors(None, None, MONITORENUMPROC(callback), 0):
+        raise OSError("Windows monitor enumeration failed")
 
     return monitors
 
@@ -164,10 +195,13 @@ class MonitorInfo:
     index: int
     name: str
     manufacturer: str
-    power_on: bool
+    power_on: bool | None
     primary: bool = False
     resolution: str = ""
     display_num: int | None = None
+    device: str = ""
+    identity: str = ""
+    power_observed: bool = False
 
     @property
     def full_name(self) -> str:
@@ -183,7 +217,7 @@ def get_monitors_fast() -> list[MonitorInfo]:
     result = []
 
     for i, wm in enumerate(win_monitors):
-        cache_key = f"{wm['device']}_{wm['width']}x{wm['height']}"
+        cache_key = wm["identity"]
         cached_name = cache.get(cache_key)
         name = cached_name or f"Monitor {i + 1}"
         manufacturer = _guess_manufacturer(name) or ""
@@ -192,48 +226,78 @@ def get_monitors_fast() -> list[MonitorInfo]:
             index=i,
             name=name,
             manufacturer=manufacturer,
-            power_on=True,
+            power_on=True if wm["primary"] else None,
             primary=wm["primary"],
             resolution=f"{wm['width']}x{wm['height']}",
             display_num=i + 1,
+            device=wm["device"],
+            identity=wm["identity"],
         ))
 
     return result
 
 
-def enrich_monitor_info(monitors: list[MonitorInfo], win_monitors: list[dict] | None = None) -> list[MonitorInfo]:
+def _open_monitor(windows_monitor: dict) -> Monitor:
+    """Open exactly one physical target under this HMONITOR, never by list index.
+
+    monitorcontrol currently exposes this Windows handle mapping only through
+    its platform adapter. Keep that dependency isolated here and test it.
+    """
+    physical = [Monitor(WindowsVCP(handle, description)) for handle, description
+                in WindowsVCP._physical_monitors_from_hmonitor(ctypes.wintypes.HMONITOR(windows_monitor["hmonitor"]))]
+    if len(physical) != 1:
+        raise OSError("Display has no unique physical monitor target")
+    return physical[0]
+
+
+def get_topology_signature() -> tuple:
+    """Cheap Windows-only check; does not send DDC/CI requests."""
+    return tuple(sorted((wm["identity"], wm["device"], wm["width"], wm["height"], wm["primary"])
+                        for wm in _get_windows_monitors()))
+
+
+def enrich_monitor_info(
+    monitors: list[MonitorInfo], win_monitors: list[dict] | None = None,
+    *, refresh_names: bool = False,
+) -> list[MonitorInfo]:
     """Slow phase — DDC/CI capabilities + power mode."""
-    physical_monitors = get_monitors()
+    # Never mutate the model owned by the Tk main thread.
+    monitors = [replace(mon) for mon in monitors]
     if win_monitors is None:
         win_monitors = _get_windows_monitors()
     cache = _load_cache()
     updated = False
 
-    for i, mon in enumerate(physical_monitors):
-        if i >= len(monitors):
-            break
-
-        with mon:
+    for info in monitors:
+        info.power_observed = False
+        targets = [wm for wm in win_monitors if wm["identity"] == info.identity and info.identity]
+        if len(targets) != 1:
+            continue
+        with _DDC_LOCK:
             try:
-                caps = mon.get_vcp_capabilities()
-                model = caps.get("model", None)
-                if model:
-                    monitors[i].name = model
-                    monitors[i].manufacturer = _guess_manufacturer(model) or ""
-                    if i < len(win_monitors):
-                        wm = win_monitors[i]
-                        cache_key = f"{wm['device']}_{wm['width']}x{wm['height']}"
-                        if cache.get(cache_key) != model:
-                            cache[cache_key] = model
+                mon = _open_monitor(targets[0])
+            except Exception:
+                logger.debug("Cannot open monitor %s", info.device, exc_info=True)
+                continue
+            with mon:
+                try:
+                    model = None if refresh_names else cache.get(info.identity)
+                    if not model:
+                        model = mon.get_vcp_capabilities().get("model")
+                    if model:
+                        info.name = model
+                        info.manufacturer = _guess_manufacturer(model) or ""
+                        if cache.get(info.identity) != model:
+                            cache[info.identity] = model
                             updated = True
-            except Exception:
-                pass
-
-            try:
-                power = mon.get_power_mode()
-                monitors[i].power_on = power == PowerMode.on
-            except Exception:
-                monitors[i].power_on = True
+                except Exception:
+                    logger.debug("Model unavailable for %s", info.device, exc_info=True)
+                try:
+                    info.power_on = mon.get_power_mode() == PowerMode.on
+                    info.power_observed = True
+                except Exception:
+                    # Silence in standby is not evidence of ON.
+                    logger.debug("Power unavailable for %s", info.device, exc_info=True)
 
     if updated:
         _save_cache(cache)
@@ -241,17 +305,39 @@ def enrich_monitor_info(monitors: list[MonitorInfo], win_monitors: list[dict] | 
     return monitors
 
 
-def set_monitor_power(index: int, turn_on: bool) -> bool:
-    """Zapne nebo vypne monitor na daném indexu."""
+def set_monitor_power(index: int, turn_on: bool, *, identity: str = "") -> bool:
+    """Resolve identity afresh, including primary protection, before every write.
+
+    index is retained for callers/diagnostics only; it never selects hardware.
+    """
+    if not identity:
+        return False
     try:
-        physical_monitors = get_monitors()
-        mon = physical_monitors[index]
-        with mon:
-            if turn_on:
-                mon.set_power_mode(PowerMode.on)
-            else:
-                mon.set_power_mode(PowerMode.off_soft)
-        return True
+        with _DDC_LOCK:
+            # Waking displays may temporarily reject DDC reads. OFF is sent once;
+            # ON is retried with bounded delays and must be confirmed by readback.
+            for delay in ((0.3, 0.6, 1.0, 1.5) if turn_on else (0,)):
+                targets = [wm for wm in _get_windows_monitors() if wm["identity"] == identity]
+                if len(targets) != 1 or (targets[0]["primary"] and not turn_on):
+                    logger.warning("Monitor target unavailable/protected: %s", identity)
+                    return False
+                try:
+                    mon = _open_monitor(targets[0])
+                    with mon:
+                        mon.set_power_mode(PowerMode.on if turn_on else PowerMode.off_soft)
+                        if not turn_on:
+                            logger.info("OFF requested: %s", identity)
+                            return True
+                        time.sleep(delay)
+                        if mon.get_power_mode() == PowerMode.on:
+                            logger.info("ON confirmed: %s", identity)
+                            return True
+                except Exception:
+                    if not turn_on:
+                        raise
+                    logger.debug("Wake not yet confirmed: %s", identity, exc_info=True)
+            logger.warning("Could not confirm ON after bounded retries: %s", identity)
+            return False
     except Exception as e:
-        print(f"Chyba při nastavování napájení monitoru {index}: {e}")
+        logger.warning("Failed to change power for monitor %s: %s", index, e)
         return False

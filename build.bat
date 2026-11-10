@@ -2,23 +2,25 @@
 echo === Monitor Control Build ===
 echo.
 
-pip install pyinstaller
+python -m pip install -r requirements-build.txt
 if %errorlevel% neq 0 (
-    echo CHYBA: Nelze nainstalovat PyInstaller
-    pause
+    echo ERROR: Could not install build requirements.
     exit /b 1
 )
 
 echo.
-echo Builduji MonitorControl.exe...
-pyinstaller --onefile --windowed --name MonitorControl main.py
+python -m unittest -v
+if %errorlevel% neq 0 exit /b 1
 
-if %errorlevel% equ 0 (
+echo Building MonitorControl.exe...
+python -m PyInstaller --noconfirm --onefile --windowed --exclude-module numpy --name MonitorControl main.py
+
+if %errorlevel% neq 0 (
     echo.
-    echo Build uspesny! Soubor: dist\MonitorControl.exe
-) else (
-    echo.
-    echo CHYBA pri buildu!
+    echo ERROR: Build failed.
+    exit /b 1
 )
-
-pause
+echo.
+echo Build successful: dist\MonitorControl.exe
+python package_release.py
+exit /b %errorlevel%

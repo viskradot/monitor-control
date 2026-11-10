@@ -26,6 +26,11 @@ build/
 
 # Claude Code
 .claude/
+CLAUDE.md
+.codex/
+.superpowers/
+docs/superpowers/
+.release-notes.md
 
 # OS
 Thumbs.db

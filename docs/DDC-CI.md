@@ -29,13 +29,28 @@
 - DDC/CI must be enabled in monitor's OSD settings (often disabled by default)
 - Enumeration is slow (~1-3 seconds per monitor)
 - Not all monitors support DDC/CI (especially older or budget models)
-- Monitor index correlation between Windows API and DDC/CI enumeration may differ
+- Windows device interface identity is resolved to the current HMONITOR before each command; hardware is never selected by enumeration index. Missing or ambiguous physical targets are refused.
 - Some monitors don't report model name in capabilities string
 - USB-C/Thunderbolt connections may not support DDC/CI
 
 ## Troubleshooting
 
 - **Toggle doesn't work**: Check DDC/CI is enabled in monitor OSD menu
-- **Wrong monitor toggles**: Index mismatch — try different monitor
+- **Monitor unavailable**: Refresh or reselect its shortcut target after reconnecting it. The app deliberately refuses to guess a different target.
 - **"No monitors found"**: Verify cable supports DDC/CI (DP/HDMI work, some adapters don't)
 - **Slow startup**: Normal — DDC/CI enumeration is inherently slow, cached names help
+
+## Wake and exit behavior
+
+OFF sends `PowerMode.off_soft` once and shows OFF (REQUESTED) until a successful reading.
+ON is retried with delays of 0.3, 0.6, 1.0 and 1.5 seconds; success requires a power-state reading of ON.
+Native driver calls can add latency beyond these delays. There is no continuous DDC polling.
+
+Normal Quit waits for pending commands and wakes only monitors successfully turned OFF by this session.
+If ON cannot be confirmed, the app stays available and asks whether to retry, quit anyway or cancel.
+Process termination, power loss and forced OS shutdown can bypass this cleanup.
+
+Hardware check on 2026-11-07: the connected Philips secondary monitor (Windows model identifier PHLC338)
+accepted OFF, reported standby (2), then returned ON (1) after repeated wake commands/readback.
+This verifies that setup only; physical-button recovery may be necessary on other models.
+The full application OFF → Quit → confirmed ON sequence was also verified on this setup.
