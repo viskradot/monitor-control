@@ -4,6 +4,17 @@ A small Windows tray utility to turn individual external monitors off and back o
 
 **0.1.0 beta — a personal utility, shared for others to use.** Hardware compatibility varies.
 
+**A purely vibe-coded personal project, built with AI assistance.** Tested on the author's Windows 11 setup and shared as-is. Support, reviews and merging contributions are not guaranteed.
+
+### Confirmed test setup
+
+| Monitor | What has been verified |
+|---|---|
+| **Philips 27M2N5500** — secondary display | DDC/CI OFF, standby readback, wake to confirmed ON, and restoration when quitting the application. |
+| **ASUS XG27AQDMG** — main display | Detection, model name, ON-state readback and main-display protection. Power OFF/wake has **not** been tested because this display is protected. |
+
+These results confirm this setup only; they are not a guarantee for other monitors, connections or drivers.
+
 [Download the Windows beta](https://github.com/viskradot/monitor-control/releases/tag/v0.1.0-beta.3)
 
 ![Monitor Control](docs/screenshot.jpg)
